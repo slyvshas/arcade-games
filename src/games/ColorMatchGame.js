@@ -1,182 +1,251 @@
 import Phaser from 'phaser';
-import { COLORS, createBackButton, showGameOver } from '../utils';
+import { COLORS, createBackButton, createScoreDisplay, showGameOver, shake, burstParticles, floatingText, flashScreen } from '../utils';
 
-const GAME_COLORS = [
-  { name: 'RED', color: 0xff6b6b, hex: '#ff6b6b' },
-  { name: 'BLUE', color: 0x0984e3, hex: '#0984e3' },
-  { name: 'GREEN', color: 0x00b894, hex: '#00b894' },
-  { name: 'YELLOW', color: 0xfeca57, hex: '#feca57' },
-  { name: 'PURPLE', color: 0x6c5ce7, hex: '#6c5ce7' },
-  { name: 'ORANGE', color: 0xe17055, hex: '#e17055' },
-];
+const COLOR_NAMES = ['RED', 'BLUE', 'GREEN', 'YELLOW', 'PURPLE', 'ORANGE'];
+const COLOR_VALUES = ['#ff6b6b', '#0984e3', '#00b894', '#feca57', '#6c5ce7', '#e17055'];
+const COLOR_HEX = [COLORS.danger, COLORS.blue, COLORS.success, COLORS.warning, COLORS.primary, COLORS.orange];
 
 export default class ColorMatchGame extends Phaser.Scene {
-  constructor() {
-    super('ColorMatchGame');
-  }
+  constructor() { super('ColorMatchGame'); }
 
   create() {
+    this.cameras.main.fadeIn(300);
+
     this.score = 0;
     this.lives = 3;
+    this.streak = 0;
+    this.maxStreak = 0;
+    this.timeLeft = 45;
     this.gameActive = true;
-    this.round = 0;
-    this.timePerRound = 3000;
-    this.roundTimer = null;
+    this.canAnswer = true;
+    this.roundTime = 0;
+    this.difficulty = 0; // 0 = easy, increases
 
-    createBackButton(this);
+    // ── Background ──
+    for (let i = 0; i < 15; i++) {
+      const c = this.add.circle(
+        Phaser.Math.Between(0, 800), Phaser.Math.Between(0, 600),
+        Phaser.Math.Between(30, 80),
+        COLOR_HEX[i % 6], 0.02
+      ).setDepth(-1);
+      this.tweens.add({
+        targets: c, alpha: 0.04, duration: Phaser.Math.Between(2000, 4000),
+        yoyo: true, repeat: -1,
+      });
+    }
 
-    // Background
-    this.add.rectangle(400, 300, 800, 600, 0x0a0a2a).setDepth(-1);
+    // ── Central Display ──
+    this.displayBg = this.add.rectangle(400, 240, 400, 160, 0x111130)
+      .setStrokeStyle(2, 0x333366).setDepth(5);
 
-    this.scoreText = this.add.text(580, 16, 'Score: 0', {
-      fontFamily: 'Orbitron, monospace', fontSize: '20px', color: '#feca57',
-    }).setDepth(100);
+    this.colorText = this.add.text(400, 220, '', {
+      fontFamily: 'Orbitron, monospace', fontSize: '52px',
+      stroke: '#000', strokeThickness: 4,
+    }).setOrigin(0.5).setDepth(10);
 
-    this.livesText = this.add.text(300, 16, '♥♥♥', {
-      fontFamily: 'Inter, Arial, sans-serif', fontSize: '18px', color: '#ff6b6b',
-    }).setDepth(100);
+    this.instructionText = this.add.text(400, 280, 'Does the WORD match the COLOR?', {
+      fontFamily: 'Inter, sans-serif', fontSize: '12px', color: '#636e72',
+    }).setOrigin(0.5).setDepth(10);
 
-    // Title
-    this.add.text(400, 80, 'Does the COLOR match the WORD?', {
-      fontFamily: 'Inter, Arial, sans-serif', fontSize: '16px', color: '#636e72',
-    }).setOrigin(0.5);
+    // ── Answer Buttons ──
+    this.matchBtn = this.createButton(300, 400, 'MATCH ✓', COLORS.success, () => this.answer(true));
+    this.noMatchBtn = this.createButton(500, 400, 'NO MATCH ✗', COLORS.danger, () => this.answer(false));
 
-    // Word display
-    this.wordText = this.add.text(400, 220, '', {
-      fontFamily: 'Orbitron, monospace', fontSize: '56px', color: '#ffffff',
-    }).setOrigin(0.5);
-
-    // Timer bar
-    this.timerBg = this.add.rectangle(400, 310, 400, 8, 0x2d2d5e);
-    this.timerBar = this.add.rectangle(200, 310, 400, 8, COLORS.accentLight).setOrigin(0, 0.5);
-
-    // Buttons
-    this.matchBtn = this.add.rectangle(300, 420, 160, 60, COLORS.success)
-      .setInteractive({ useHandCursor: true });
-    this.add.text(300, 420, '✓ MATCH', {
-      fontFamily: 'Inter, Arial, sans-serif', fontSize: '20px', color: '#ffffff', fontStyle: 'bold',
-    }).setOrigin(0.5);
-
-    this.noMatchBtn = this.add.rectangle(500, 420, 160, 60, COLORS.danger)
-      .setInteractive({ useHandCursor: true });
-    this.add.text(500, 420, '✗ NO MATCH', {
-      fontFamily: 'Inter, Arial, sans-serif', fontSize: '20px', color: '#ffffff', fontStyle: 'bold',
-    }).setOrigin(0.5);
-
-    this.matchBtn.on('pointerdown', () => this.answer(true));
-    this.noMatchBtn.on('pointerdown', () => this.answer(false));
-
-    this.matchBtn.on('pointerover', () => this.matchBtn.setFillStyle(COLORS.successLight));
-    this.matchBtn.on('pointerout', () => this.matchBtn.setFillStyle(COLORS.success));
-    this.noMatchBtn.on('pointerover', () => this.noMatchBtn.setFillStyle(COLORS.dangerLight));
-    this.noMatchBtn.on('pointerout', () => this.noMatchBtn.setFillStyle(COLORS.danger));
-
-    // Keyboard controls
+    // Keyboard shortcuts
     this.input.keyboard.on('keydown-LEFT', () => this.answer(true));
     this.input.keyboard.on('keydown-RIGHT', () => this.answer(false));
     this.input.keyboard.on('keydown-A', () => this.answer(true));
     this.input.keyboard.on('keydown-D', () => this.answer(false));
 
-    // Feedback text
-    this.feedbackText = this.add.text(400, 500, '', {
-      fontFamily: 'Orbitron, monospace', fontSize: '24px', color: '#55efc4',
+    // ── Timer ──
+    this.timerEvent = this.time.addEvent({
+      delay: 1000,
+      callback: () => {
+        this.timeLeft--;
+        this.timerText.setText(`${this.timeLeft}s`);
+        this.updateTimerBar();
+        if (this.timeLeft <= 0) {
+          this.gameActive = false;
+          this.timerEvent.destroy();
+          showGameOver(this, this.score, 'ColorMatchGame');
+        }
+      },
+      loop: true,
+    });
+
+    // ── Round Timer Bar (per-question) ──
+    this.roundBarBg = this.add.rectangle(400, 340, 300, 6, 0x222244).setDepth(5);
+    this.roundBar = this.add.rectangle(250, 340, 300, 6, COLORS.accent).setOrigin(0, 0.5).setDepth(6);
+
+    // ── UI ──
+    createBackButton(this);
+    this.scoreText = createScoreDisplay(this);
+
+    this.timerText = this.add.text(400, 24, '45s', {
+      fontFamily: 'Orbitron, monospace', fontSize: '22px', color: '#ff6b6b',
+      stroke: '#000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(100);
+
+    this.timerBarBg = this.add.rectangle(400, 55, 300, 8, 0x222244).setDepth(100);
+    this.timerBar = this.add.rectangle(250, 55, 300, 8, COLORS.neon).setOrigin(0, 0.5).setDepth(101);
+
+    this.livesText = this.add.text(16, 16, '', {
+      fontFamily: 'Orbitron, monospace', fontSize: '14px', color: '#ff6b6b',
+      stroke: '#000', strokeThickness: 2,
+    }).setDepth(100);
+    this.updateLivesText();
+
+    this.streakText = this.add.text(400, 470, '', {
+      fontFamily: 'Orbitron, monospace', fontSize: '16px', color: '#00ff88',
+      stroke: '#000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(100).setAlpha(0);
+
+    this.add.text(400, 530, '← A = MATCH     NO MATCH = D →', {
+      fontFamily: 'Inter, sans-serif', fontSize: '11px', color: '#333366',
     }).setOrigin(0.5);
 
-    this.add.text(400, 550, 'A / ← = Match    D / → = No Match', {
-      fontFamily: 'Inter, Arial, sans-serif', fontSize: '12px', color: '#4a4a6a',
-    }).setOrigin(0.5);
-
+    // ── Start First Round ──
     this.nextRound();
+  }
+
+  createButton(x, y, label, color, callback) {
+    const bg = this.add.rectangle(x, y, 160, 56, color, 0.2)
+      .setStrokeStyle(2, color).setDepth(10)
+      .setInteractive({ useHandCursor: true });
+    const txt = this.add.text(x, y, label, {
+      fontFamily: 'Orbitron, monospace', fontSize: '14px', color: '#ffffff',
+    }).setOrigin(0.5).setDepth(11);
+
+    bg.on('pointerover', () => { bg.setFillStyle(color, 0.4); });
+    bg.on('pointerout', () => { bg.setFillStyle(color, 0.2); });
+    bg.on('pointerdown', callback);
+
+    return { bg, txt };
   }
 
   nextRound() {
     if (!this.gameActive) return;
-    this.round++;
-
-    // Decide if it's a match or not (50/50)
-    this.isMatch = Math.random() > 0.5;
+    this.canAnswer = true;
+    this.roundTime = 0;
 
     // Pick word and display color
-    const wordIndex = Phaser.Math.Between(0, GAME_COLORS.length - 1);
-    let displayColorIndex;
+    const wordIdx = Phaser.Math.Between(0, COLOR_NAMES.length - 1);
+    let colorIdx;
 
-    if (this.isMatch) {
-      displayColorIndex = wordIndex;
-    } else {
+    // As difficulty increases, matching becomes less likely
+    if (Math.random() < 0.4 + this.difficulty * 0.05) {
+      // Non-matching
       do {
-        displayColorIndex = Phaser.Math.Between(0, GAME_COLORS.length - 1);
-      } while (displayColorIndex === wordIndex);
-    }
-
-    this.wordText.setText(GAME_COLORS[wordIndex].name);
-    this.wordText.setColor(GAME_COLORS[displayColorIndex].hex);
-
-    // Timer
-    this.timePerRound = Math.max(1000, 3000 - this.round * 30);
-    this.roundStart = this.time.now;
-
-    if (this.roundTimer) this.roundTimer.destroy();
-    this.roundTimer = this.time.delayedCall(this.timePerRound, () => {
-      this.wrongAnswer();
-    });
-
-    this.answered = false;
-  }
-
-  answer(playerSaysMatch) {
-    if (!this.gameActive || this.answered) return;
-    this.answered = true;
-    if (this.roundTimer) this.roundTimer.destroy();
-
-    if (playerSaysMatch === this.isMatch) {
-      // Correct!
-      const timeBonus = Math.floor((this.timePerRound - (this.time.now - this.roundStart)) / 100);
-      const points = 10 + timeBonus;
-      this.score += points;
-      this.scoreText.setText('Score: ' + this.score);
-
-      this.feedbackText.setText(`✓ +${points}`).setColor('#55efc4');
-      this.tweens.add({
-        targets: this.feedbackText, scale: 1.3, duration: 150, yoyo: true,
-      });
+        colorIdx = Phaser.Math.Between(0, COLOR_NAMES.length - 1);
+      } while (colorIdx === wordIdx);
     } else {
-      this.wrongAnswer();
-      return;
+      colorIdx = wordIdx;
     }
 
-    this.time.delayedCall(400, () => this.nextRound());
-  }
+    this.currentWord = COLOR_NAMES[wordIdx];
+    this.currentColorIdx = colorIdx;
+    this.isMatch = wordIdx === colorIdx;
 
-  wrongAnswer() {
-    this.lives--;
-    this.livesText.setText('♥'.repeat(Math.max(0, this.lives)));
-    this.feedbackText.setText('✗ WRONG').setColor('#ff6b6b');
-    this.answered = true;
-
-    // Screen flash
-    const flash = this.add.rectangle(400, 300, 800, 600, COLORS.danger, 0.2);
+    // Animate text in
+    this.colorText.setText(this.currentWord)
+      .setColor(COLOR_VALUES[colorIdx])
+      .setScale(0);
     this.tweens.add({
-      targets: flash, alpha: 0, duration: 300, onComplete: () => flash.destroy(),
+      targets: this.colorText, scaleX: 1, scaleY: 1,
+      duration: 200, ease: 'Back.easeOut',
     });
 
-    if (this.lives <= 0) {
-      this.gameActive = false;
-      this.time.delayedCall(500, () => showGameOver(this, this.score, 'ColorMatchGame'));
-    } else {
-      this.time.delayedCall(600, () => this.nextRound());
-    }
+    // Reset round bar
+    this.roundBar.setSize(300, 6).setFillStyle(COLORS.accent);
+
+    // Difficulty ramp
+    this.difficulty = Math.min(10, this.difficulty + 0.1);
   }
 
-  update() {
-    if (!this.gameActive || this.answered) return;
+  answer(saidMatch) {
+    if (!this.canAnswer || !this.gameActive) return;
+    this.canAnswer = false;
 
-    // Update timer bar
-    const elapsed = this.time.now - this.roundStart;
-    const progress = 1 - (elapsed / this.timePerRound);
-    this.timerBar.scaleX = Math.max(0, progress);
+    const correct = saidMatch === this.isMatch;
 
-    if (progress > 0.5) this.timerBar.setFillStyle(COLORS.accentLight);
-    else if (progress > 0.25) this.timerBar.setFillStyle(COLORS.warning);
-    else this.timerBar.setFillStyle(COLORS.danger);
+    if (correct) {
+      this.streak++;
+      this.maxStreak = Math.max(this.maxStreak, this.streak);
+      const timeBonus = Math.max(0, Math.floor(10 - this.roundTime / 200));
+      const streakBonus = Math.min(this.streak, 10);
+      const pts = 10 + timeBonus + streakBonus;
+      this.score += pts;
+      this.scoreText.setText(`Score: ${this.score}`);
+
+      burstParticles(this, 400, 240, COLORS.neon, 8, 25);
+      floatingText(this, 400, 180, `+${pts}`, '#00ff88');
+
+      // Flash display border green
+      this.displayBg.setStrokeStyle(3, COLORS.neon);
+      this.time.delayedCall(200, () => this.displayBg.setStrokeStyle(2, 0x333366));
+
+      if (this.streak >= 5) {
+        this.streakText.setText(`🔥 ${this.streak} STREAK!`).setAlpha(1);
+        this.tweens.add({ targets: this.streakText, alpha: 0, duration: 800, delay: 300 });
+      }
+
+      // Speed bonus for fast answers
+      if (this.roundTime < 500) {
+        floatingText(this, 400, 160, 'FAST!', '#feca57', '14px');
+        this.score += 5;
+      }
+    } else {
+      this.streak = 0;
+      this.lives--;
+      this.updateLivesText();
+      shake(this, 0.006, 150);
+      flashScreen(this, COLORS.danger, 0.3, 250);
+
+      // Flash display border red
+      this.displayBg.setStrokeStyle(3, COLORS.danger);
+      this.time.delayedCall(200, () => this.displayBg.setStrokeStyle(2, 0x333366));
+
+      floatingText(this, 400, 180, 'WRONG!', '#ff6b6b');
+
+      if (this.lives <= 0) {
+        this.gameActive = false;
+        if (this.timerEvent) this.timerEvent.destroy();
+        this.time.delayedCall(500, () => {
+          showGameOver(this, this.score, 'ColorMatchGame');
+        });
+        return;
+      }
+    }
+
+    this.time.delayedCall(300, () => this.nextRound());
+  }
+
+  updateLivesText() {
+    this.livesText.setText('♥'.repeat(this.lives));
+  }
+
+  updateTimerBar() {
+    const pct = this.timeLeft / 45;
+    this.timerBar.setSize(300 * pct, 8);
+    if (pct < 0.3) this.timerBar.setFillStyle(COLORS.danger);
+    else if (pct < 0.6) this.timerBar.setFillStyle(COLORS.warning);
+  }
+
+  update(time, delta) {
+    if (!this.gameActive) return;
+
+    this.roundTime += delta;
+
+    // Animate round bar depleting
+    const roundLimit = 3000 - this.difficulty * 100;
+    const pct = Math.max(0, 1 - this.roundTime / roundLimit);
+    this.roundBar.setSize(300 * pct, 6);
+    if (pct < 0.3) this.roundBar.setFillStyle(COLORS.danger);
+    else if (pct < 0.6) this.roundBar.setFillStyle(COLORS.warning);
+
+    // Auto-fail if too slow
+    if (this.roundTime > roundLimit && this.canAnswer) {
+      this.answer(!this.isMatch); // Wrong answer
+    }
   }
 }

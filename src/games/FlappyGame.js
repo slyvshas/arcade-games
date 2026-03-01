@@ -1,198 +1,243 @@
 import Phaser from 'phaser';
-import { COLORS, createBackButton, showGameOver } from '../utils';
+import { COLORS, createBackButton, createScoreDisplay, showGameOver, shake, burstParticles, floatingText, flashScreen } from '../utils';
 
 export default class FlappyGame extends Phaser.Scene {
-  constructor() {
-    super('FlappyGame');
-  }
+  constructor() { super('FlappyGame'); }
 
   create() {
+    this.cameras.main.fadeIn(300);
+    this.physics.world.gravity.y = 0;
+
     this.score = 0;
     this.gameActive = false;
     this.started = false;
-    this.pipeSpeed = -200;
-    this.pipeGap = 160;
-    this.pipeTimer = null;
+    this.pipeSpeed = -220;
+    this.gapSize = 160;
+    this.passed = new Set();
+    this.bestStreak = 0;
 
-    createBackButton(this);
-
-    // Sky
-    const sky = this.add.graphics();
-    sky.fillGradientStyle(0x1a3a5c, 0x1a3a5c, 0x0a2040, 0x0a2040);
-    sky.fillRect(0, 0, 800, 600);
-    sky.setDepth(-2);
-
-    // Clouds
-    for (let i = 0; i < 5; i++) {
-      const cx = Phaser.Math.Between(0, 800);
-      const cy = Phaser.Math.Between(30, 200);
-      const cloud = this.add.ellipse(cx, cy, Phaser.Math.Between(60, 120), 30, 0xffffff, 0.05);
-      cloud.setDepth(-1);
+    // ── Scrolling Background ──
+    this.bgLayers = [];
+    // Far layer (dark buildings)
+    for (let i = 0; i < 12; i++) {
+      const bh = Phaser.Math.Between(80, 200);
+      const bx = i * 80;
+      const b = this.add.rectangle(bx, 600 - bh / 2, 60, bh, 0x0c0c20).setDepth(-3);
+      this.bgLayers.push({ obj: b, speed: 0.3 });
+    }
+    // Near layer (lighter buildings)
+    for (let i = 0; i < 8; i++) {
+      const bh = Phaser.Math.Between(60, 140);
+      const bx = i * 110 + 30;
+      const b = this.add.rectangle(bx, 600 - bh / 2, 80, bh, 0x141435).setDepth(-2);
+      this.bgLayers.push({ obj: b, speed: 0.6 });
     }
 
-    // Ground
-    this.ground = this.add.rectangle(400, 580, 800, 40, 0x3d5c3a);
-    this.physics.add.existing(this.ground, true);
+    // Stars
+    for (let i = 0; i < 30; i++) {
+      this.add.circle(
+        Phaser.Math.Between(0, 800), Phaser.Math.Between(0, 250),
+        Phaser.Math.FloatBetween(0.5, 1.5), 0xffffff, Phaser.Math.FloatBetween(0.05, 0.2)
+      ).setDepth(-4);
+    }
 
-    // Bird
-    this.bird = this.add.rectangle(150, 300, 30, 22, COLORS.warning);
+    // ── Ground ──
+    this.ground = this.add.rectangle(400, 590, 800, 20, 0x1a1a3a).setDepth(5);
+    this.add.rectangle(400, 581, 800, 2, COLORS.neon, 0.3).setDepth(5);
+
+    // ── Bird ──
+    this.bird = this.add.rectangle(150, 300, 30, 22, COLORS.warning).setDepth(10);
     this.physics.add.existing(this.bird);
-    this.bird.body.setGravityY(800);
-    this.bird.body.setCollideWorldBounds(false);
     this.bird.body.allowGravity = false;
-
-    // Bird wing
-    this.wing = this.add.triangle(140, 300, 0, 0, -12, -8, -12, 8, COLORS.warningLight);
-
-    // Bird eye
-    this.eye = this.add.circle(160, 296, 4, 0xffffff);
-    this.pupil = this.add.circle(162, 296, 2, 0x000000);
+    this.bird.body.setSize(26, 18);
+    // Wing
+    this.wing = this.add.triangle(140, 300, 0, 0, -12, -8, -12, 8, COLORS.orange).setDepth(9);
+    // Eye
+    this.birdEye = this.add.circle(160, 296, 4, 0xffffff).setDepth(11);
+    this.birdPupil = this.add.circle(162, 295, 2, 0x000000).setDepth(12);
     // Beak
-    this.beak = this.add.triangle(170, 300, 0, 0, 10, 4, 0, 8, COLORS.orange);
+    this.beak = this.add.triangle(168, 300, 0, -4, 10, 0, 0, 4, COLORS.orange).setDepth(11);
 
-    // Pipes group
+    // ── Pipes ──
     this.pipes = this.physics.add.group();
-    this.scoreZones = this.physics.add.group();
+    this.pipeTimer = null;
 
-    // Colliders
-    this.physics.add.collider(this.bird, this.ground, () => this.die());
-    this.physics.add.collider(this.bird, this.pipes, () => this.die());
-    this.physics.add.overlap(this.bird, this.scoreZones, this.addScore, null, this);
-
-    // Score display
-    this.scoreText = this.add.text(400, 50, '0', {
-      fontFamily: 'Orbitron, monospace', fontSize: '48px', color: '#ffffff',
-      stroke: '#000000', strokeThickness: 4,
-    }).setOrigin(0.5).setDepth(50);
-
-    // Start instruction
-    this.startText = this.add.text(400, 350, 'TAP or SPACE to fly!', {
-      fontFamily: 'Inter, Arial, sans-serif', fontSize: '20px', color: '#ffffff',
-      backgroundColor: '#00000066', padding: { x: 16, y: 8 },
-    }).setOrigin(0.5).setDepth(50);
-
-    // Controls
-    this.input.keyboard.on('keydown-SPACE', () => this.flap());
+    // ── Input ──
     this.input.on('pointerdown', () => this.flap());
+    this.spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.spaceKey.on('down', () => this.flap());
 
-    // Idle animation
+    // ── UI ──
+    createBackButton(this);
+    this.scoreText = this.add.text(400, 60, '0', {
+      fontFamily: 'Orbitron, monospace', fontSize: '56px', color: '#ffffff',
+      stroke: '#000', strokeThickness: 6,
+    }).setOrigin(0.5).setDepth(100).setAlpha(0.7);
+
+    // Start prompt
+    this.startText = this.add.text(400, 350, 'TAP or SPACE to Start', {
+      fontFamily: 'Inter, sans-serif', fontSize: '16px', color: '#636e72',
+    }).setOrigin(0.5).setDepth(100);
+    this.tweens.add({ targets: this.startText, alpha: 0.4, duration: 800, yoyo: true, repeat: -1 });
+
+    // Idle bird float
     this.tweens.add({
-      targets: this.bird,
-      y: 280, duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+      targets: [this.bird, this.wing, this.birdEye, this.birdPupil, this.beak],
+      y: '+=10', duration: 800, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
     });
   }
 
   flap() {
     if (!this.started) {
-      this.started = true;
-      this.gameActive = true;
-      this.bird.body.allowGravity = true;
-      this.tweens.killTweensOf(this.bird);
-      if (this.startText) this.startText.destroy();
-      // Start spawning pipes
-      this.spawnPipe();
-      this.pipeTimer = this.time.addEvent({
-        delay: 1800, callback: this.spawnPipe, callbackScope: this, loop: true,
-      });
+      this.startGame();
+      return;
     }
     if (!this.gameActive) return;
-    this.bird.body.setVelocityY(-280);
+
+    this.bird.body.setVelocityY(-320);
+
+    // Wing flap animation
+    this.tweens.add({
+      targets: this.wing, angle: -30, duration: 80,
+      yoyo: true, ease: 'Power1',
+    });
+
+    // Tiny particles
+    burstParticles(this, this.bird.x - 10, this.bird.y + 5, 0xffffff, 3, 10);
+  }
+
+  startGame() {
+    this.started = true;
+    this.gameActive = true;
+    this.startText.destroy();
+    this.tweens.killAll();
+
+    this.bird.body.allowGravity = true;
+    this.bird.body.setGravityY(850);
+    this.bird.body.setVelocityY(-320);
+
+    // Spawn pipes
+    this.pipeTimer = this.time.addEvent({
+      delay: 1800,
+      callback: this.spawnPipe,
+      callbackScope: this,
+      loop: true,
+    });
+
+    // First pipe after a short delay
+    this.time.delayedCall(1200, () => this.spawnPipe());
   }
 
   spawnPipe() {
     if (!this.gameActive) return;
-    const gapY = Phaser.Math.Between(130, 430);
-    const pipeW = 52;
+
+    const gapY = Phaser.Math.Between(140, 420);
+    const gap = this.gapSize - Math.min(this.score * 1.5, 30); // Gets harder
 
     // Top pipe
-    const topH = gapY - this.pipeGap / 2;
-    const top = this.add.rectangle(850, topH / 2, pipeW, topH, COLORS.success);
+    const topH = gapY - gap / 2;
+    const top = this.add.rectangle(850, topH / 2, 60, topH, COLORS.neon, 0.8).setDepth(3);
+    this.add.rectangle(850, topH - 2, 68, 16, COLORS.neon).setDepth(3).setData('pipeDecor', true);
     this.physics.add.existing(top);
-    top.body.setVelocityX(this.pipeSpeed);
-    top.body.setImmovable(true);
     top.body.allowGravity = false;
+    top.body.setVelocityX(this.pipeSpeed - this.score * 3);
+    top.body.setImmovable(true);
     this.pipes.add(top);
 
-    // Top pipe cap
-    const topCap = this.add.rectangle(850, topH - 2, pipeW + 8, 16, COLORS.successLight);
-    this.physics.add.existing(topCap);
-    topCap.body.setVelocityX(this.pipeSpeed);
-    topCap.body.setImmovable(true);
-    topCap.body.allowGravity = false;
-    this.pipes.add(topCap);
-
     // Bottom pipe
-    const botTop = gapY + this.pipeGap / 2;
-    const botH = 560 - botTop;
-    const bot = this.add.rectangle(850, botTop + botH / 2, pipeW, botH, COLORS.success);
+    const botY = gapY + gap / 2;
+    const botH = 600 - botY;
+    const bot = this.add.rectangle(850, botY + botH / 2, 60, botH, COLORS.neon, 0.8).setDepth(3);
+    this.add.rectangle(850, botY + 2, 68, 16, COLORS.neon).setDepth(3).setData('pipeDecor', true);
     this.physics.add.existing(bot);
-    bot.body.setVelocityX(this.pipeSpeed);
-    bot.body.setImmovable(true);
     bot.body.allowGravity = false;
+    bot.body.setVelocityX(this.pipeSpeed - this.score * 3);
+    bot.body.setImmovable(true);
     this.pipes.add(bot);
 
-    // Bottom pipe cap
-    const botCap = this.add.rectangle(850, botTop + 2, pipeW + 8, 16, COLORS.successLight);
-    this.physics.add.existing(botCap);
-    botCap.body.setVelocityX(this.pipeSpeed);
-    botCap.body.setImmovable(true);
-    botCap.body.allowGravity = false;
-    this.pipes.add(botCap);
-
-    // Score zone
-    const zone = this.add.rectangle(850, gapY, 4, this.pipeGap, 0x000000, 0);
-    this.physics.add.existing(zone);
-    zone.body.setVelocityX(this.pipeSpeed);
-    zone.body.allowGravity = false;
-    zone.scored = false;
-    this.scoreZones.add(zone);
+    // Score trigger
+    const trigger = this.add.rectangle(850, 300, 4, 600, 0x000000, 0).setDepth(0);
+    this.physics.add.existing(trigger);
+    trigger.body.allowGravity = false;
+    trigger.body.setVelocityX(this.pipeSpeed - this.score * 3);
+    trigger.setData('scored', false);
+    this.pipes.add(trigger);
   }
 
-  addScore(bird, zone) {
-    if (zone.scored) return;
-    zone.scored = true;
-    this.score++;
-    this.scoreText.setText(this.score.toString());
+  update(time, delta) {
+    if (!this.started) return;
 
-    // Speed up gradually
-    if (this.score % 5 === 0 && this.pipeSpeed > -350) {
-      this.pipeSpeed -= 20;
+    // Scroll backgrounds
+    this.bgLayers.forEach(l => {
+      l.obj.x += (this.pipeSpeed * 0.005 * l.speed);
+      if (l.obj.x < -80) l.obj.x = 860;
+    });
+
+    if (!this.gameActive) return;
+
+    // Update bird visual parts
+    const by = this.bird.y;
+    this.wing.setPosition(this.bird.x - 12, by);
+    this.birdEye.setPosition(this.bird.x + 8, by - 4);
+    this.birdPupil.setPosition(this.bird.x + 9, by - 5);
+    this.beak.setPosition(this.bird.x + 18, by);
+
+    // Bird rotation based on velocity
+    const vy = this.bird.body.velocity.y;
+    this.bird.setAngle(Phaser.Math.Clamp(vy * 0.1, -25, 70));
+
+    // Check pipe collisions & scoring
+    this.pipes.getChildren().forEach(pipe => {
+      if (!pipe.active) return;
+
+      // Score trigger
+      if (pipe.getData('scored') === false && pipe.x < this.bird.x) {
+        pipe.setData('scored', true);
+        this.score++;
+        this.scoreText.setText(String(this.score));
+
+        // Score flash
+        this.tweens.add({
+          targets: this.scoreText, scale: 1.3, duration: 100, yoyo: true,
+        });
+        floatingText(this, this.bird.x + 40, this.bird.y, '+1', '#00ff88', '16px');
+      }
+
+      // Collision with pipes
+      if (pipe.getData('scored') !== false && pipe.getData('pipeDecor') !== true) {
+        if (Phaser.Geom.Rectangle.Overlaps(this.bird.getBounds(), pipe.getBounds())) {
+          this.die();
+          return;
+        }
+      }
+
+      // Cleanup off-screen
+      if (pipe.x < -100) pipe.destroy();
+    });
+
+    // Floor/ceiling death
+    if (this.bird.y > 575 || this.bird.y < 5) {
+      this.die();
     }
+
+    // Trail
+    const tr = this.add.circle(this.bird.x - 10, by, 3, COLORS.warning, 0.4);
+    this.tweens.add({ targets: tr, alpha: 0, scale: 0, duration: 300, onComplete: () => tr.destroy() });
   }
 
   die() {
     if (!this.gameActive) return;
     this.gameActive = false;
+
+    shake(this, 0.012, 300);
+    flashScreen(this, COLORS.danger, 0.5, 400);
+    burstParticles(this, this.bird.x, this.bird.y, COLORS.warning, 15, 40);
+
     if (this.pipeTimer) this.pipeTimer.destroy();
-    this.bird.setFillStyle(COLORS.danger);
     this.physics.pause();
-    this.time.delayedCall(600, () => showGameOver(this, this.score, 'FlappyGame'));
-  }
 
-  update() {
-    if (!this.started) return;
-
-    // Update bird parts
-    const bx = this.bird.x;
-    const by = this.bird.y;
-    const rot = Phaser.Math.Clamp(this.bird.body.velocity.y / 600, -0.5, 0.5);
-    this.bird.rotation = rot;
-    this.wing.setPosition(bx - 12, by);
-    this.eye.setPosition(bx + 8, by - 4);
-    this.pupil.setPosition(bx + 9, by - 4);
-    this.beak.setPosition(bx + 18, by);
-
-    // Remove off-screen pipes
-    this.pipes.children.entries.forEach(pipe => {
-      if (pipe.x < -60) pipe.destroy();
+    this.time.delayedCall(600, () => {
+      showGameOver(this, this.score, 'FlappyGame');
     });
-    this.scoreZones.children.entries.forEach(zone => {
-      if (zone.x < -60) zone.destroy();
-    });
-
-    // Bird fell off screen
-    if (this.bird.y > 600 || this.bird.y < -50) {
-      this.die();
-    }
   }
 }

@@ -1,220 +1,221 @@
 import Phaser from 'phaser';
-import { COLORS, createBackButton, showGameOver } from '../utils';
+import { COLORS, createBackButton, createScoreDisplay, showGameOver, shake, burstParticles, floatingText, flashScreen } from '../utils';
 
 export default class WhackAMoleGame extends Phaser.Scene {
-  constructor() {
-    super('WhackAMoleGame');
-  }
+  constructor() { super('WhackAMoleGame'); }
 
   create() {
+    this.cameras.main.fadeIn(300);
+
     this.score = 0;
     this.timeLeft = 30;
-    this.gameActive = true;
     this.combo = 0;
+    this.maxCombo = 0;
+    this.gameActive = true;
+    this.moleSpeed = 1500;
+    this.goldenChance = 0.1;
 
-    createBackButton(this);
+    // ── Background ──
+    const gfx = this.add.graphics();
+    gfx.fillStyle(0x0d0d25);
+    gfx.fillRect(0, 0, 800, 600);
 
-    // Background (dirt)
-    this.add.rectangle(400, 300, 800, 600, 0x3d2b1f).setDepth(-1);
-
-    // Grass top
-    this.add.rectangle(400, 50, 800, 100, 0x4a7c3f).setDepth(-1);
-
-    this.scoreText = this.add.text(580, 16, 'Score: 0', {
-      fontFamily: 'Orbitron, monospace', fontSize: '20px', color: '#feca57',
-    }).setDepth(100);
-
-    this.timerText = this.add.text(300, 16, 'Time: 30', {
-      fontFamily: 'Orbitron, monospace', fontSize: '20px', color: '#ff6b6b',
-    }).setDepth(100);
-
-    this.comboText = this.add.text(400, 90, '', {
-      fontFamily: 'Orbitron, monospace', fontSize: '16px', color: '#55efc4',
-    }).setOrigin(0.5).setDepth(100);
-
-    // Create mole holes in 3x3 grid
+    // ── Mole Grid (3x3) ──
     this.holes = [];
-    const cols = 3;
-    const rows = 3;
-    const startX = 200;
-    const startY = 170;
-    const gapX = 200;
-    const gapY = 140;
+    const gridSize = 3;
+    const holeW = 120, holeH = 100, gap = 30;
+    const totalW = gridSize * holeW + (gridSize - 1) * gap;
+    const totalH = gridSize * holeH + (gridSize - 1) * gap;
+    const startX = (800 - totalW) / 2 + holeW / 2;
+    const startY = (600 - totalH) / 2 + holeH / 2 + 30;
 
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const x = startX + c * gapX;
-        const y = startY + r * gapY;
-        this.createHole(x, y);
+    for (let r = 0; r < gridSize; r++) {
+      for (let c = 0; c < gridSize; c++) {
+        const x = startX + c * (holeW + gap);
+        const y = startY + r * (holeH + gap);
+        this.createHole(x, y, holeW, holeH);
       }
     }
 
-    // Timer
+    // ── Controls ──
+    // Touch/click handled per mole
+
+    // ── Timer ──
     this.timerEvent = this.time.addEvent({
       delay: 1000,
       callback: () => {
         this.timeLeft--;
-        this.timerText.setText('Time: ' + this.timeLeft);
+        this.timerText.setText(`${this.timeLeft}s`);
+        this.updateTimerBar();
+
+        // Speed up over time
+        if (this.timeLeft === 20) this.moleSpeed = 1200;
+        if (this.timeLeft === 10) { this.moleSpeed = 900; this.goldenChance = 0.15; }
+        if (this.timeLeft === 5) this.moleSpeed = 700;
+
         if (this.timeLeft <= 0) {
           this.gameActive = false;
           this.timerEvent.destroy();
-          if (this.spawnEvent) this.spawnEvent.destroy();
-          showGameOver(this, this.score, 'WhackAMoleGame');
+          this.time.delayedCall(500, () => {
+            showGameOver(this, this.score, 'WhackAMoleGame');
+          });
         }
       },
       loop: true,
     });
 
-    // Spawn moles
-    this.spawnEvent = this.time.addEvent({
-      delay: 800,
-      callback: this.spawnMole,
-      callbackScope: this,
-      loop: true,
-    });
+    // ── Mole Spawner ──
+    this.spawnMole();
 
-    // Start text
-    const txt = this.add.text(400, 300, 'WHACK THE MOLES!', {
-      fontFamily: 'Orbitron, monospace', fontSize: '24px', color: '#ffffff',
-      backgroundColor: '#00000088', padding: { x: 16, y: 8 },
-    }).setOrigin(0.5).setDepth(50);
-    this.time.delayedCall(1500, () => txt.destroy());
+    // ── UI ──
+    createBackButton(this);
+    this.scoreText = createScoreDisplay(this);
+
+    this.timerText = this.add.text(400, 24, '30s', {
+      fontFamily: 'Orbitron, monospace', fontSize: '24px', color: '#ff6b6b',
+      stroke: '#000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(100);
+
+    // Timer bar
+    this.timerBarBg = this.add.rectangle(400, 55, 300, 8, 0x222244).setDepth(100);
+    this.timerBar = this.add.rectangle(250, 55, 300, 8, COLORS.neon).setOrigin(0, 0.5).setDepth(101);
+
+    this.comboText = this.add.text(400, 80, '', {
+      fontFamily: 'Orbitron, monospace', fontSize: '18px', color: '#00ff88',
+      stroke: '#000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(100).setAlpha(0);
   }
 
-  createHole(x, y) {
+  createHole(x, y, w, h) {
+    // Hole background
+    const holeBg = this.add.ellipse(x, y + 20, w - 10, 40, 0x1a1a3a).setDepth(1);
+    const holeRim = this.add.ellipse(x, y + 20, w, 44, 0x222244, 0.5).setDepth(0);
+
     const hole = {
-      x, y, active: false, mole: null,
+      x, y, w, h,
+      bg: holeBg,
+      rim: holeRim,
+      mole: null,
+      active: false,
+      golden: false,
     };
-
-    // Hole shadow
-    this.add.ellipse(x, y + 30, 90, 30, 0x1a0f0a, 0.6);
-
-    // Hole
-    const holeGfx = this.add.ellipse(x, y + 20, 80, 24, 0x2a1a0f);
-    holeGfx.setDepth(2);
-
-    // Mole
-    const moleBody = this.add.ellipse(x, y + 40, 50, 40, 0x8B6914);
-    moleBody.setDepth(1);
-    moleBody.setAlpha(0);
-    hole.moleBody = moleBody;
-
-    // Mole face
-    const leftEye = this.add.circle(x - 10, y + 25, 5, 0xffffff);
-    leftEye.setDepth(1).setAlpha(0);
-    hole.leftEye = leftEye;
-
-    const rightEye = this.add.circle(x + 10, y + 25, 5, 0xffffff);
-    rightEye.setDepth(1).setAlpha(0);
-    hole.rightEye = rightEye;
-
-    const leftPupil = this.add.circle(x - 10, y + 25, 2.5, 0x000000);
-    leftPupil.setDepth(1).setAlpha(0);
-    hole.leftPupil = leftPupil;
-
-    const rightPupil = this.add.circle(x + 10, y + 25, 2.5, 0x000000);
-    rightPupil.setDepth(1).setAlpha(0);
-    hole.rightPupil = rightPupil;
-
-    const nose = this.add.circle(x, y + 32, 4, 0xff9999);
-    nose.setDepth(1).setAlpha(0);
-    hole.nose = nose;
-
-    // Hit zone
-    const hitZone = this.add.rectangle(x, y + 10, 70, 60, 0x000000, 0)
-      .setInteractive({ useHandCursor: true }).setDepth(3);
-
-    hitZone.on('pointerdown', () => this.whack(hole));
-
     this.holes.push(hole);
   }
 
   spawnMole() {
     if (!this.gameActive) return;
 
-    const inactive = this.holes.filter(h => !h.active);
-    if (inactive.length === 0) return;
+    // Pick random empty hole
+    const empty = this.holes.filter(h => !h.active);
+    if (empty.length === 0) {
+      this.time.delayedCall(200, () => this.spawnMole());
+      return;
+    }
 
-    const hole = Phaser.Utils.Array.GetRandom(inactive);
+    const hole = empty[Phaser.Math.Between(0, empty.length - 1)];
     hole.active = true;
+    hole.golden = Math.random() < this.goldenChance;
 
-    // Show mole
-    const parts = [hole.moleBody, hole.leftEye, hole.rightEye, hole.leftPupil, hole.rightPupil, hole.nose];
-    parts.forEach(p => p.setAlpha(1));
+    const moleColor = hole.golden ? COLORS.gold : COLORS.orange;
+
+    // Mole body
+    const moleBody = this.add.rectangle(hole.x, hole.y + 50, 50, 50, moleColor)
+      .setDepth(3).setInteractive({ useHandCursor: true });
+
+    // Mole head
+    const moleHead = this.add.circle(hole.x, hole.y + 20, 28, moleColor).setDepth(4);
+
+    // Eyes
+    const eyeL = this.add.circle(hole.x - 10, hole.y + 15, 5, 0xffffff).setDepth(5);
+    const eyeR = this.add.circle(hole.x + 10, hole.y + 15, 5, 0xffffff).setDepth(5);
+    const pupilL = this.add.circle(hole.x - 10, hole.y + 16, 2.5, 0x000000).setDepth(6);
+    const pupilR = this.add.circle(hole.x + 10, hole.y + 16, 2.5, 0x000000).setDepth(6);
+
+    // Nose
+    const nose = this.add.circle(hole.x, hole.y + 24, 4, 0x8B4513).setDepth(5);
+
+    const parts = [moleBody, moleHead, eyeL, eyeR, pupilL, pupilR, nose];
+    hole.mole = parts;
+
+    if (hole.golden) {
+      // Golden sparkle
+      this.tweens.add({ targets: moleHead, fillColor: COLORS.warning, duration: 200, yoyo: true, repeat: -1 });
+    }
 
     // Pop up animation
+    parts.forEach(p => { p.y += 60; p.setAlpha(0); });
     this.tweens.add({
-      targets: hole.moleBody,
-      y: hole.y, duration: 150, ease: 'Back.easeOut',
+      targets: parts, y: '-=60', alpha: 1, duration: 200, ease: 'Back.easeOut',
     });
-    this.tweens.add({ targets: hole.leftEye, y: hole.y - 8, duration: 150 });
-    this.tweens.add({ targets: hole.rightEye, y: hole.y - 8, duration: 150 });
-    this.tweens.add({ targets: hole.leftPupil, y: hole.y - 8, duration: 150 });
-    this.tweens.add({ targets: hole.rightPupil, y: hole.y - 8, duration: 150 });
-    this.tweens.add({ targets: hole.nose, y: hole.y, duration: 150 });
 
-    // Auto-hide after delay
-    const duration = Math.max(600, 1500 - this.score * 5);
-    hole.hideTimer = this.time.delayedCall(duration, () => {
+    // Click handler
+    const whack = () => {
+      if (!hole.active || !this.gameActive) return;
+      hole.active = false;
+
+      this.combo++;
+      this.maxCombo = Math.max(this.maxCombo, this.combo);
+      const mult = Math.min(this.combo, 5);
+      const pts = (hole.golden ? 50 : 10) * mult;
+      this.score += pts;
+      this.scoreText.setText(`Score: ${this.score}`);
+
+      const color = hole.golden ? COLORS.gold : COLORS.warning;
+      burstParticles(this, hole.x, hole.y, color, hole.golden ? 15 : 8, 35);
+      floatingText(this, hole.x, hole.y - 20, `+${pts}`, hole.golden ? '#ffd700' : '#feca57');
+      shake(this, 0.003, 80);
+
+      if (this.combo >= 3) {
+        this.comboText.setText(`${this.combo}x COMBO!`).setAlpha(1);
+        this.tweens.add({ targets: this.comboText, alpha: 0, duration: 800, delay: 200 });
+      }
+
+      if (hole.golden) {
+        flashScreen(this, COLORS.gold, 0.15, 200);
+      }
+
+      // Squish animation
+      this.tweens.add({
+        targets: parts, scaleY: 0.3, alpha: 0, duration: 150,
+        onComplete: () => parts.forEach(p => p.destroy()),
+      });
+
+      hole.mole = null;
+    };
+
+    moleBody.on('pointerdown', whack);
+    moleHead.setInteractive({ useHandCursor: true }).on('pointerdown', whack);
+
+    // Auto hide if not whacked
+    this.time.delayedCall(this.moleSpeed, () => {
       if (hole.active) {
-        this.hideMole(hole);
-        this.combo = 0;
-        this.comboText.setText('');
+        hole.active = false;
+        this.combo = 0; // Reset combo on miss
+
+        this.tweens.add({
+          targets: parts, y: '+=60', alpha: 0, duration: 200,
+          onComplete: () => parts.forEach(p => p.destroy()),
+        });
+        hole.mole = null;
       }
     });
-  }
 
-  hideMole(hole) {
-    hole.active = false;
-    const parts = [hole.moleBody, hole.leftEye, hole.rightEye, hole.leftPupil, hole.rightPupil, hole.nose];
-    this.tweens.add({
-      targets: hole.moleBody, y: hole.y + 40, duration: 100,
-    });
-    this.time.delayedCall(100, () => {
-      parts.forEach(p => p.setAlpha(0));
-      // Reset positions
-      hole.moleBody.y = hole.y + 40;
-      hole.leftEye.y = hole.y + 25;
-      hole.rightEye.y = hole.y + 25;
-      hole.leftPupil.y = hole.y + 25;
-      hole.rightPupil.y = hole.y + 25;
-      hole.nose.y = hole.y + 32;
-    });
-  }
+    // Schedule next mole
+    const nextDelay = Phaser.Math.Between(400, Math.max(600, 1200 - this.timeLeft * 15));
+    this.time.delayedCall(nextDelay, () => this.spawnMole());
 
-  whack(hole) {
-    if (!hole.active || !this.gameActive) return;
-
-    if (hole.hideTimer) hole.hideTimer.destroy();
-
-    this.combo++;
-    const points = 10 * this.combo;
-    this.score += points;
-    this.scoreText.setText('Score: ' + this.score);
-
-    if (this.combo > 1) {
-      this.comboText.setText(`${this.combo}x COMBO! +${points}`);
-    }
-
-    // Hit effect
-    const star = this.add.text(hole.x, hole.y - 20, `+${points}`, {
-      fontFamily: 'Orbitron, monospace', fontSize: '18px', color: '#feca57',
-    }).setOrigin(0.5).setDepth(10);
-    this.tweens.add({
-      targets: star, y: hole.y - 60, alpha: 0, duration: 600,
-      onComplete: () => star.destroy(),
-    });
-
-    // Flash mole red then hide
-    hole.moleBody.setFillStyle(COLORS.danger);
-    this.time.delayedCall(100, () => {
-      hole.moleBody.setFillStyle(0x8B6914);
-      this.hideMole(hole);
-    });
-
-    // Speed up spawning
-    if (this.score % 50 === 0 && this.spawnEvent.delay > 400) {
-      this.spawnEvent.delay -= 50;
+    // Sometimes spawn 2 moles
+    if (this.timeLeft < 15 && Math.random() < 0.3) {
+      this.time.delayedCall(200, () => this.spawnMole());
     }
   }
+
+  updateTimerBar() {
+    const pct = this.timeLeft / 30;
+    this.timerBar.setSize(300 * pct, 8);
+    if (pct < 0.3) this.timerBar.setFillStyle(COLORS.danger);
+    else if (pct < 0.6) this.timerBar.setFillStyle(COLORS.warning);
+  }
+
+  update() {}
 }

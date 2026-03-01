@@ -1,179 +1,278 @@
 import Phaser from 'phaser';
-import { COLORS, createBackButton, showGameOver } from '../utils';
-
-const GRID = 20;
-const COLS = 30;
-const ROWS = 25;
-const OFFSET_X = (800 - COLS * GRID) / 2;
-const OFFSET_Y = 50;
+import { COLORS, createBackButton, createScoreDisplay, showGameOver, shake, burstParticles, floatingText, flashScreen } from '../utils';
 
 export default class SnakeGame extends Phaser.Scene {
-  constructor() {
-    super('SnakeGame');
-  }
+  constructor() { super('SnakeGame'); }
 
   create() {
-    this.score = 0;
-    this.gameActive = true;
-    this.moveDelay = 120;
-    this.lastMoveTime = 0;
+    this.cameras.main.fadeIn(300);
+
+    this.cellSize = 20;
+    this.cols = 38; // 760/20
+    this.rows = 27; // 540/20
+    this.offsetX = 20;
+    this.offsetY = 40;
+
     this.direction = { x: 1, y: 0 };
-    this.nextDirection = { x: 1, y: 0 };
+    this.nextDir = { x: 1, y: 0 };
+    this.snake = [{ x: 5, y: 13 }, { x: 4, y: 13 }, { x: 3, y: 13 }];
+    this.score = 0;
+    this.speed = 140;
+    this.moveTimer = 0;
+    this.gameActive = true;
+    this.combo = 0;
+    this.comboTimer = 0;
+    this.foodEaten = 0;
 
-    createBackButton(this);
-
-    // Background grid
+    // ── Background grid ──
     const gfx = this.add.graphics();
-    gfx.fillStyle(0x111122, 1);
-    gfx.fillRect(OFFSET_X, OFFSET_Y, COLS * GRID, ROWS * GRID);
-    gfx.lineStyle(1, 0x1a1a3a, 0.3);
-    for (let x = 0; x <= COLS; x++) {
-      gfx.lineBetween(OFFSET_X + x * GRID, OFFSET_Y, OFFSET_X + x * GRID, OFFSET_Y + ROWS * GRID);
+    gfx.fillStyle(0x0d0d25);
+    gfx.fillRect(this.offsetX, this.offsetY, this.cols * this.cellSize, this.rows * this.cellSize);
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        if ((r + c) % 2 === 0) {
+          gfx.fillStyle(0x111130, 0.5);
+          gfx.fillRect(this.offsetX + c * this.cellSize, this.offsetY + r * this.cellSize, this.cellSize, this.cellSize);
+        }
+      }
     }
-    for (let y = 0; y <= ROWS; y++) {
-      gfx.lineBetween(OFFSET_X, OFFSET_Y + y * GRID, OFFSET_X + COLS * GRID, OFFSET_Y + y * GRID);
-    }
+    // Border glow
+    gfx.lineStyle(2, COLORS.primary, 0.4);
+    gfx.strokeRect(this.offsetX, this.offsetY, this.cols * this.cellSize, this.rows * this.cellSize);
 
-    // Score
-    this.scoreText = this.add.text(650, 16, 'Score: 0', {
-      fontFamily: 'Orbitron, monospace', fontSize: '20px', color: '#feca57',
-    }).setDepth(100);
+    // ── Snake body graphics ──
+    this.snakeGfx = [];
+    this.trailGfx = [];
 
-    // Snake body
-    this.snake = [
-      { x: 5, y: 12 }, { x: 4, y: 12 }, { x: 3, y: 12 },
-    ];
-    this.snakeGraphics = this.add.graphics();
+    // ── Food ──
+    this.food = null;
+    this.specialFood = null;
+    this.spawnFood();
 
-    // Food
-    this.food = { x: 15, y: 12 };
-    this.foodGraphics = this.add.graphics();
-    this.placeFood();
-
-    // Controls
+    // ── Controls ──
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys('W,A,S,D');
 
-    this.input.keyboard.on('keydown', (event) => {
-      if (!this.gameActive) return;
-      switch (event.code) {
-        case 'ArrowUp': case 'KeyW':
-          if (this.direction.y === 0) this.nextDirection = { x: 0, y: -1 };
-          break;
-        case 'ArrowDown': case 'KeyS':
-          if (this.direction.y === 0) this.nextDirection = { x: 0, y: 1 };
-          break;
-        case 'ArrowLeft': case 'KeyA':
-          if (this.direction.x === 0) this.nextDirection = { x: -1, y: 0 };
-          break;
-        case 'ArrowRight': case 'KeyD':
-          if (this.direction.x === 0) this.nextDirection = { x: 1, y: 0 };
-          break;
+    // Swipe detection
+    this.swipeStart = null;
+    this.input.on('pointerdown', (ptr) => { this.swipeStart = { x: ptr.x, y: ptr.y }; });
+    this.input.on('pointerup', (ptr) => {
+      if (!this.swipeStart) return;
+      const dx = ptr.x - this.swipeStart.x;
+      const dy = ptr.y - this.swipeStart.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > 30) {
+        if (Math.abs(dx) > Math.abs(dy)) {
+          if (dx > 0 && this.direction.x !== -1) this.nextDir = { x: 1, y: 0 };
+          else if (dx < 0 && this.direction.x !== 1) this.nextDir = { x: -1, y: 0 };
+        } else {
+          if (dy > 0 && this.direction.y !== -1) this.nextDir = { x: 0, y: 1 };
+          else if (dy < 0 && this.direction.y !== 1) this.nextDir = { x: 0, y: -1 };
+        }
       }
+      this.swipeStart = null;
     });
 
-    // Swipe controls for mobile
-    this.input.on('pointerdown', (p) => { this.swipeStart = { x: p.x, y: p.y }; });
-    this.input.on('pointerup', (p) => {
-      if (!this.swipeStart || !this.gameActive) return;
-      const dx = p.x - this.swipeStart.x;
-      const dy = p.y - this.swipeStart.y;
-      if (Math.abs(dx) > Math.abs(dy)) {
-        if (dx > 20 && this.direction.x === 0) this.nextDirection = { x: 1, y: 0 };
-        else if (dx < -20 && this.direction.x === 0) this.nextDirection = { x: -1, y: 0 };
-      } else {
-        if (dy > 20 && this.direction.y === 0) this.nextDirection = { x: 0, y: 1 };
-        else if (dy < -20 && this.direction.y === 0) this.nextDirection = { x: 0, y: -1 };
-      }
-    });
+    // ── UI ──
+    createBackButton(this);
+    this.scoreText = createScoreDisplay(this);
+    this.comboText = this.add.text(400, 26, '', {
+      fontFamily: 'Orbitron, monospace', fontSize: '16px', color: '#00ff88',
+      stroke: '#000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(100).setAlpha(0);
 
-    this.drawSnake();
+    this.lengthText = this.add.text(200, 16, `Length: ${this.snake.length}`, {
+      fontFamily: 'Inter, sans-serif', fontSize: '12px', color: '#636e72',
+    }).setDepth(100);
   }
 
-  placeFood() {
-    let valid = false;
-    while (!valid) {
-      this.food.x = Phaser.Math.Between(0, COLS - 1);
-      this.food.y = Phaser.Math.Between(0, ROWS - 1);
-      valid = !this.snake.some(s => s.x === this.food.x && s.y === this.food.y);
+  spawnFood() {
+    let fx, fy, valid;
+    do {
+      fx = Phaser.Math.Between(0, this.cols - 1);
+      fy = Phaser.Math.Between(0, this.rows - 1);
+      valid = !this.snake.some(s => s.x === fx && s.y === fy);
+    } while (!valid);
+
+    if (this.food) this.food.destroy();
+    this.food = this.add.circle(
+      this.offsetX + fx * this.cellSize + this.cellSize / 2,
+      this.offsetY + fy * this.cellSize + this.cellSize / 2,
+      7, COLORS.danger
+    ).setDepth(10);
+    this.food.setData('gx', fx);
+    this.food.setData('gy', fy);
+
+    // Pulse animation
+    this.tweens.add({ targets: this.food, scale: 1.3, duration: 500, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+
+    // Bonus food every 5 eaten
+    if (this.foodEaten > 0 && this.foodEaten % 5 === 0 && !this.specialFood) {
+      this.spawnSpecialFood();
     }
-    this.foodGraphics.clear();
-    this.foodGraphics.fillStyle(COLORS.danger, 1);
-    this.foodGraphics.fillCircle(
-      OFFSET_X + this.food.x * GRID + GRID / 2,
-      OFFSET_Y + this.food.y * GRID + GRID / 2,
-      GRID / 2 - 2
-    );
   }
 
-  drawSnake() {
-    this.snakeGraphics.clear();
-    this.snake.forEach((seg, i) => {
-      const alpha = 1 - (i / this.snake.length) * 0.4;
-      const color = i === 0 ? COLORS.success : COLORS.successLight;
-      this.snakeGraphics.fillStyle(color, alpha);
-      this.snakeGraphics.fillRoundedRect(
-        OFFSET_X + seg.x * GRID + 1,
-        OFFSET_Y + seg.y * GRID + 1,
-        GRID - 2, GRID - 2, 4
-      );
+  spawnSpecialFood() {
+    let fx, fy, valid;
+    do {
+      fx = Phaser.Math.Between(0, this.cols - 1);
+      fy = Phaser.Math.Between(0, this.rows - 1);
+      valid = !this.snake.some(s => s.x === fx && s.y === fy);
+    } while (!valid);
+
+    this.specialFood = this.add.circle(
+      this.offsetX + fx * this.cellSize + this.cellSize / 2,
+      this.offsetY + fy * this.cellSize + this.cellSize / 2,
+      8, COLORS.neon
+    ).setDepth(10);
+    this.specialFood.setData('gx', fx);
+    this.specialFood.setData('gy', fy);
+    this.tweens.add({ targets: this.specialFood, scale: 1.5, alpha: 0.6, duration: 300, yoyo: true, repeat: -1 });
+
+    // Disappears after 5 seconds
+    this.time.delayedCall(5000, () => {
+      if (this.specialFood) { this.specialFood.destroy(); this.specialFood = null; }
     });
-    // Eyes on head
-    const head = this.snake[0];
-    const hx = OFFSET_X + head.x * GRID + GRID / 2;
-    const hy = OFFSET_Y + head.y * GRID + GRID / 2;
-    this.snakeGraphics.fillStyle(0xffffff, 1);
-    this.snakeGraphics.fillCircle(hx - 3 + this.direction.x * 3, hy - 3 + this.direction.y * 3, 3);
-    this.snakeGraphics.fillCircle(hx + 3 + this.direction.x * 3, hy - 3 + this.direction.y * 3, 3);
-    this.snakeGraphics.fillStyle(0x000000, 1);
-    this.snakeGraphics.fillCircle(hx - 3 + this.direction.x * 4, hy - 3 + this.direction.y * 4, 1.5);
-    this.snakeGraphics.fillCircle(hx + 3 + this.direction.x * 4, hy - 3 + this.direction.y * 4, 1.5);
   }
 
-  update(time) {
+  update(time, delta) {
     if (!this.gameActive) return;
-    if (time - this.lastMoveTime < this.moveDelay) return;
-    this.lastMoveTime = time;
 
-    this.direction = { ...this.nextDirection };
+    // Keyboard input
+    if (this.cursors.left.isDown || this.wasd.A.isDown) { if (this.direction.x !== 1) this.nextDir = { x: -1, y: 0 }; }
+    else if (this.cursors.right.isDown || this.wasd.D.isDown) { if (this.direction.x !== -1) this.nextDir = { x: 1, y: 0 }; }
+    else if (this.cursors.up.isDown || this.wasd.W.isDown) { if (this.direction.y !== 1) this.nextDir = { x: 0, y: -1 }; }
+    else if (this.cursors.down.isDown || this.wasd.S.isDown) { if (this.direction.y !== -1) this.nextDir = { x: 0, y: 1 }; }
+
+    // Combo decay
+    if (this.comboTimer > 0) {
+      this.comboTimer -= delta;
+      if (this.comboTimer <= 0) this.combo = 0;
+    }
+
+    this.moveTimer += delta;
+    if (this.moveTimer < this.speed) return;
+    this.moveTimer = 0;
+
+    this.direction = { ...this.nextDir };
+
+    // New head position
     const head = this.snake[0];
-    const newHead = { x: head.x + this.direction.x, y: head.y + this.direction.y };
+    const nx = head.x + this.direction.x;
+    const ny = head.y + this.direction.y;
 
     // Wall collision
-    if (newHead.x < 0 || newHead.x >= COLS || newHead.y < 0 || newHead.y >= ROWS) {
-      return this.die();
+    if (nx < 0 || nx >= this.cols || ny < 0 || ny >= this.rows) {
+      this.die();
+      return;
     }
+
     // Self collision
-    if (this.snake.some(s => s.x === newHead.x && s.y === newHead.y)) {
-      return this.die();
+    if (this.snake.some(s => s.x === nx && s.y === ny)) {
+      this.die();
+      return;
     }
 
-    this.snake.unshift(newHead);
+    this.snake.unshift({ x: nx, y: ny });
 
-    // Eat food
-    if (newHead.x === this.food.x && newHead.y === this.food.y) {
-      this.score += 10;
-      this.scoreText.setText('Score: ' + this.score);
-      this.moveDelay = Math.max(50, this.moveDelay - 2);
-      this.placeFood();
-    } else {
+    // Check food
+    let ate = false;
+    if (this.food && nx === this.food.getData('gx') && ny === this.food.getData('gy')) {
+      this.foodEaten++;
+      this.combo++;
+      this.comboTimer = 3000;
+      const mult = Math.min(this.combo, 5);
+      const pts = 10 * mult;
+      this.score += pts;
+      this.scoreText.setText(`Score: ${this.score}`);
+      this.lengthText.setText(`Length: ${this.snake.length}`);
+
+      const wx = this.offsetX + nx * this.cellSize + this.cellSize / 2;
+      const wy = this.offsetY + ny * this.cellSize + this.cellSize / 2;
+      burstParticles(this, wx, wy, COLORS.warning, 6, 20);
+      floatingText(this, wx, wy - 10, `+${pts}`);
+
+      if (this.combo >= 3) {
+        this.comboText.setText(`${this.combo}x COMBO`).setAlpha(1);
+        this.tweens.add({ targets: this.comboText, alpha: 0, duration: 1000, delay: 300 });
+      }
+
+      // Speed up
+      this.speed = Math.max(60, this.speed - 2);
+      this.spawnFood();
+      ate = true;
+    }
+
+    // Check special food
+    if (this.specialFood && nx === this.specialFood.getData('gx') && ny === this.specialFood.getData('gy')) {
+      this.score += 50;
+      this.scoreText.setText(`Score: ${this.score}`);
+      const wx = this.offsetX + nx * this.cellSize + this.cellSize / 2;
+      const wy = this.offsetY + ny * this.cellSize + this.cellSize / 2;
+      burstParticles(this, wx, wy, COLORS.neon, 15, 35);
+      floatingText(this, wx, wy - 10, '+50', '#00ff88', '22px');
+      flashScreen(this, COLORS.neon, 0.1, 200);
+      this.specialFood.destroy();
+      this.specialFood = null;
+      ate = true;
+    }
+
+    if (!ate) {
       this.snake.pop();
     }
 
     this.drawSnake();
   }
 
+  drawSnake() {
+    // Clear old
+    this.snakeGfx.forEach(g => g.destroy());
+    this.snakeGfx = [];
+
+    this.snake.forEach((seg, i) => {
+      const wx = this.offsetX + seg.x * this.cellSize + this.cellSize / 2;
+      const wy = this.offsetY + seg.y * this.cellSize + this.cellSize / 2;
+      const t = i / this.snake.length;
+      const isHead = i === 0;
+
+      // Body segment
+      const size = isHead ? this.cellSize - 2 : this.cellSize - 3;
+      const hue = Phaser.Display.Color.Interpolate.ColorWithColor(
+        Phaser.Display.Color.ValueToColor(COLORS.neon),
+        Phaser.Display.Color.ValueToColor(COLORS.primary),
+        100, Math.floor(t * 100)
+      );
+      const color = Phaser.Display.Color.GetColor(hue.r, hue.g, hue.b);
+      const seg_gfx = this.add.rectangle(wx, wy, size, size, color).setDepth(5);
+      this.snakeGfx.push(seg_gfx);
+
+      if (isHead) {
+        // Eyes
+        const ex1 = this.add.circle(wx - 4 + this.direction.x * 4, wy - 4 + this.direction.y * 4, 3, 0xffffff).setDepth(7);
+        const ex2 = this.add.circle(wx + 4 + this.direction.x * 4, wy - 4 + this.direction.y * 4, 3, 0xffffff).setDepth(7);
+        const p1 = this.add.circle(wx - 4 + this.direction.x * 5, wy - 4 + this.direction.y * 5, 1.5, 0x000000).setDepth(8);
+        const p2 = this.add.circle(wx + 4 + this.direction.x * 5, wy - 4 + this.direction.y * 5, 1.5, 0x000000).setDepth(8);
+        this.snakeGfx.push(ex1, ex2, p1, p2);
+      }
+    });
+  }
+
   die() {
     this.gameActive = false;
-    // Flash snake red
-    this.snakeGraphics.clear();
-    this.snake.forEach(seg => {
-      this.snakeGraphics.fillStyle(COLORS.danger, 0.8);
-      this.snakeGraphics.fillRoundedRect(
-        OFFSET_X + seg.x * GRID + 1, OFFSET_Y + seg.y * GRID + 1,
-        GRID - 2, GRID - 2, 4
-      );
+    shake(this, 0.01, 300);
+    flashScreen(this, COLORS.danger, 0.5, 400);
+
+    // Death explosion along snake body
+    this.snake.forEach((seg, i) => {
+      this.time.delayedCall(i * 30, () => {
+        const wx = this.offsetX + seg.x * this.cellSize + this.cellSize / 2;
+        const wy = this.offsetY + seg.y * this.cellSize + this.cellSize / 2;
+        burstParticles(this, wx, wy, COLORS.danger, 4, 15);
+      });
     });
-    this.time.delayedCall(500, () => showGameOver(this, this.score, 'SnakeGame'));
+
+    this.time.delayedCall(Math.min(this.snake.length * 30 + 200, 1500), () => {
+      showGameOver(this, this.score, 'SnakeGame');
+    });
   }
 }
